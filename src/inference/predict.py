@@ -8,10 +8,16 @@ from torchvision import transforms
 
 # ---------------- PATH & IMPORT FIX ----------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
+# Go up two levels: src/inference -> src -> project_root
 root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
 
 # Dynamically load model_architecture module from file path
 model_arch_path = os.path.join(root_dir, "models", "model_architecture.py")
+
+# Debug: verify the path exists
+if not os.path.exists(model_arch_path):
+    raise FileNotFoundError(f"model_architecture.py not found at: {model_arch_path}")
+
 spec = importlib.util.spec_from_file_location("model_architecture", model_arch_path)
 model_arch = importlib.util.module_from_spec(spec)
 sys.modules['model_architecture'] = model_arch
