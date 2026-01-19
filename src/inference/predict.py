@@ -8,8 +8,8 @@ from torchvision import transforms
 # ---------------- PATH & IMPORT FIX ----------------
 # Force add the project root to system path so we can find 'models'
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# Go up two levels: src/inference -> src -> root
-root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
+# Go up three levels: src/inference -> src -> deepfake-detection-project -> root
+root_dir = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
 
 # Insert at beginning of sys.path to prioritize it
 if root_dir not in sys.path:
