@@ -10,7 +10,10 @@ from torchvision import transforms
 current_dir = os.path.dirname(os.path.abspath(__file__))
 # Go up two levels: src/inference -> src -> root
 root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
-sys.path.append(root_dir)
+
+# Insert at beginning of sys.path to prioritize it
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 from models.model_architecture import DeepfakeDetector
 
