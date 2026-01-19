@@ -77,3 +77,14 @@ def predict_face(face_bgr):
     return label, confidence
 
 if __name__ == "__main__":
+    test_image_path = "path_to_your_test_image.jpg"
+    image = cv2.imread(test_image_path)
+    
+    if image is not None:
+        result_label, result_conf = predict_face(image)
+        print("-" * 30)
+        print(f"RESULT: {result_label}")
+        print(f"CONFIDENCE: {result_conf:.2f}%")
+        print("-" * 30)
+    else:
+        print("❌ Could not load image. Check path!")
