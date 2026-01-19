@@ -3,19 +3,21 @@ import cv2
 import numpy as np
 import sys
 import os
+import importlib.util
 from torchvision import transforms
 
 # ---------------- PATH & IMPORT FIX ----------------
-# Force add the project root to system path so we can find 'models'
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# Go up three levels: src/inference -> src -> deepfake-detection-project -> root
-root_dir = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
+root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
 
-# Insert at beginning of sys.path to prioritize it
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
+# Dynamically load model_architecture module from file path
+model_arch_path = os.path.join(root_dir, "models", "model_architecture.py")
+spec = importlib.util.spec_from_file_location("model_architecture", model_arch_path)
+model_arch = importlib.util.module_from_spec(spec)
+sys.modules['model_architecture'] = model_arch
+spec.loader.exec_module(model_arch)
 
-from models.model_architecture import DeepfakeDetector
+DeepfakeDetector = model_arch.DeepfakeDetector
 
 # ---------------- DEVICE ----------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
