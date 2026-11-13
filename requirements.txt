@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.37
 opencv-python-headless
 numpy
 Pillow
@@ -6,3 +6,4 @@ torch
 torchvision
 matplotlib
 seaborn
+scikit-learn

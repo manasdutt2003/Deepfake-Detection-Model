@@ -1,12 +1,35 @@
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
-import numpy as np
+"""Fine-tune ResNet-18 to separate real faces from deepfakes.
+
+Expects:
+    data/processed/train/real/*.jpg
+    data/processed/train/fake/*.jpg
+
+Usage (from the repository root):
+    python -m src.training.train --epochs 5
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
 import random
+import sys
+
+import torch
+import torch.nn as nn
 from PIL import Image
-from models.model_architecture import DeepfakeDetector
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from models.model_architecture import DeepfakeDetector  # noqa: E402
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+NORMALIZE = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
 
 class FastDeepfakeDataset(Dataset):
     def __init__(self, file_paths, labels, transform=None):
@@ -18,114 +41,129 @@ class FastDeepfakeDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
-        try:
-            img_path = self.file_paths[idx]
-            image = Image.open(img_path).convert("RGB")
-            label = self.labels[idx]
+        # A corrupt file should not end the run. Step to the next sample,
+        # giving up only if every file in the dataset is unreadable.
+        for offset in range(len(self.file_paths)):
+            current = (idx + offset) % len(self.file_paths)
+            try:
+                image = Image.open(self.file_paths[current]).convert("RGB")
+            except (OSError, ValueError):
+                continue
             if self.transform:
                 image = self.transform(image)
-            return image, label
-        except Exception as e:
-            # If a file is corrupt, return the first item instead of crashing
-            return self.__getitem__(0)
+            return image, self.labels[current]
+        raise RuntimeError("No readable images in the dataset.")
 
-def main():
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Training on: {DEVICE}", flush=True)
 
-    # --- SCALE CONFIG ---
-    IMAGES_PER_CLASS = 15000     # Safely increased (Total 30,000 images)
-    BATCH_SIZE = 32              # Increase to 64 if you have a strong GPU
-    EPOCHS = 5                   
-    LEARNING_RATE = 1e-4
+def list_images(folder: str, limit: int) -> list[str]:
+    """Collect up to `limit` image paths. scandir stays fast on huge folders."""
+    paths = []
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.lower().endswith(IMAGE_EXTENSIONS):
+                paths.append(entry.path)
+                if len(paths) >= limit:
+                    break
+    return paths
 
-    transform = transforms.Compose([
+
+def accuracy(model, loader, device) -> float:
+    model.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.float().unsqueeze(1).to(device)
+            preds = (torch.sigmoid(model(images)) > 0.5).float()
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return 100 * correct / max(total, 1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--data-dir", default=os.path.join(ROOT_DIR, "data", "processed", "train"))
+    parser.add_argument("--output", default=os.path.join(ROOT_DIR, "models", "best_deepfake_model.pth"))
+    parser.add_argument("--images-per-class", type=int, default=15000)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on: {device}", flush=True)
+
+    train_transform = transforms.Compose([
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        NORMALIZE,
+    ])
+    val_transform = transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        NORMALIZE,
     ])
 
-    # --- FAST DIRECT INDEXING ---
-    root_dir = "data/processed/train"
-    real_dir = os.path.join(root_dir, "real")
-    fake_dir = os.path.join(root_dir, "fake")
+    real_paths = list_images(os.path.join(args.data_dir, "real"), args.images_per_class)
+    fake_paths = list_images(os.path.join(args.data_dir, "fake"), args.images_per_class)
+    if not real_paths or not fake_paths:
+        sys.exit(f"Need images in both {args.data_dir}/real and {args.data_dir}/fake.")
 
-    print(f"📂 Selecting {IMAGES_PER_CLASS*2} total images...", flush=True)
-    
-    # Use os.scandir for much faster performance on large folders
-    def get_paths(folder, count):
-        paths = []
-        with os.scandir(folder) as it:
-            for entry in it:
-                if entry.is_file() and entry.name.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    paths.append(entry.path)
-                    if len(paths) >= count:
-                        break
-        return paths
+    samples = [(p, 0) for p in real_paths] + [(p, 1) for p in fake_paths]  # 0=real, 1=fake
+    random.shuffle(samples)
+    paths, labels = zip(*samples)
 
-    real_paths = get_paths(real_dir, IMAGES_PER_CLASS)
-    fake_paths = get_paths(fake_dir, IMAGES_PER_CLASS)
+    split = int(0.85 * len(paths))
+    train_ds = FastDeepfakeDataset(paths[:split], labels[:split], transform=train_transform)
+    val_ds = FastDeepfakeDataset(paths[split:], labels[split:], transform=val_transform)
 
-    all_paths = real_paths + fake_paths
-    all_labels = [0] * len(real_paths) + [1] * len(fake_paths) # 0=Real, 1=Fake
+    # num_workers=0 avoids hung worker processes on Windows.
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}", flush=True)
 
-    # Shuffle
-    combined = list(zip(all_paths, all_labels))
-    random.shuffle(combined)
-    all_paths, all_labels = zip(*combined)
-
-    split = int(0.85 * len(all_paths))
-    train_ds = FastDeepfakeDataset(all_paths[:split], all_labels[:split], transform=transform)
-    val_ds = FastDeepfakeDataset(all_paths[split:], all_labels[split:], transform=transform)
-
-    # num_workers=0 is still recommended for Windows to avoid 'stuck' processes
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-
-    print(f"✅ Data Ready | Train: {len(train_ds)} | Val: {len(val_ds)}", flush=True)
-
-    # --- INITIALIZE MODEL ---
-    model = DeepfakeDetector().to(DEVICE)
+    model = DeepfakeDetector(pretrained=True).to(device)
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    # --- TRAINING LOOP ---
-    best_acc = 0
-    for epoch in range(EPOCHS):
+    best_acc = 0.0
+    for epoch in range(1, args.epochs + 1):
         model.train()
-        train_loss = 0
-        print(f"\n🔁 Epoch {epoch+1}/{EPOCHS}", flush=True)
+        running_loss = 0.0
 
-        for i, (images, labels) in enumerate(train_loader):
-            images, labels = images.to(DEVICE), labels.float().unsqueeze(1).to(DEVICE)
-            
+        for step, (images, targets) in enumerate(train_loader):
+            images = images.to(device)
+            targets = targets.float().unsqueeze(1).to(device)
+
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
+            loss = criterion(model(images), targets)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
+            running_loss += loss.item()
 
-            if i % 50 == 0:
-                print(f"Batch {i}/{len(train_loader)} | Loss: {loss.item():.4f}", flush=True)
+            if step % 50 == 0:
+                print(f"Epoch {epoch} | batch {step}/{len(train_loader)} | loss {loss.item():.4f}", flush=True)
 
-        # Validation
-        model.eval()
-        correct = 0
-        with torch.no_grad():
-            for images, labels in val_loader:
-                images, labels = images.to(DEVICE), labels.float().unsqueeze(1).to(DEVICE)
-                preds = (torch.sigmoid(model(images)) > 0.5).float()
-                correct += (preds == labels).sum().item()
-
-        val_acc = 100 * correct / len(val_ds)
-        print(f"✨ Epoch {epoch+1} Summary | Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc:.2f}%", flush=True)
+        val_acc = accuracy(model, val_loader, device)
+        print(
+            f"Epoch {epoch}/{args.epochs} | loss {running_loss / len(train_loader):.4f} "
+            f"| val acc {val_acc:.2f}%",
+            flush=True,
+        )
 
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), "models/best_deepfake_model.pth")
-            print("💾 New Best Model Saved!", flush=True)
+            os.makedirs(os.path.dirname(args.output), exist_ok=True)
+            torch.save(model.state_dict(), args.output)
+            print(f"Saved new best model to {args.output}", flush=True)
+
 
 if __name__ == "__main__":
     main()
