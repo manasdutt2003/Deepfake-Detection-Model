@@ -9,6 +9,8 @@ image -> face detection (OpenCV Haar cascade) -> 224x224 crop
       -> ResNet-18 (single logit) -> sigmoid -> REAL / UNCERTAIN / DEEPFAKE
 ```
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module responsibilities and design decisions.
+
 ## How a verdict is reached
 
 The model outputs one number: the probability that the face is fake.
@@ -18,6 +20,9 @@ The model outputs one number: the probability that the face is fake.
 | above 0.65 | DEEPFAKE |
 | 0.35 to 0.65 | UNCERTAIN |
 | below 0.35 | REAL |
+
+The thresholds can be changed with `DEEPFAKE_FAKE_THRESHOLD` and
+`DEEPFAKE_REAL_THRESHOLD`.
 
 ## Run the app
 
@@ -31,11 +36,38 @@ streamlit run app/streamlit_app.py
 The demo login is `admin` / `admin`. Set `APP_USERNAME` and `APP_PASSWORD`
 (environment variables or Streamlit secrets) before exposing the app publicly.
 
+### With Docker
+
+```bash
+docker build -t deepfake-detector .
+docker run -p 8501:8501 -e APP_USERNAME=me -e APP_PASSWORD=change-me deepfake-detector
+```
+
+Then open http://localhost:8501.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEEPFAKE_MODEL_PATH` | `models/best_deepfake_model.pth` | Checkpoint to load |
+| `DEEPFAKE_FAKE_THRESHOLD` | `0.65` | Above this: DEEPFAKE |
+| `DEEPFAKE_REAL_THRESHOLD` | `0.35` | Below this: REAL |
+| `APP_USERNAME` / `APP_PASSWORD` | `admin` / `admin` | App login |
+
 ## Classify one image from the command line
 
 ```bash
-python -m src.inference.predict path/to/photo.jpg
+python -m src.inference.predict path/to/photo.jpg --verbose
 ```
+
+## Tests
+
+```bash
+pip install pytest
+python -m pytest tests -q
+```
+
+The tests use a stubbed model, so they do not need the checkpoint.
 
 ## Train
 
@@ -79,6 +111,9 @@ it shows the figures recorded at training time.
 | `src/preprocessing/face_detection.py` | Face detection and cropping |
 | `src/inference/predict.py` | Model loading and prediction |
 | `src/training/train.py`, `evaluate.py` | Training and evaluation scripts |
+| `tests/` | pytest tests |
+| `docs/ARCHITECTURE.md` | Design notes |
+| `Dockerfile` | Container image for the app |
 
 ## Limitations
 
